@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*.part
+*.pdf
+paper_download_report.*
+test_output/

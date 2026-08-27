@@ -1,0 +1,4 @@
+interface:
+  display_name: "Download Papers From List"
+  short_description: "Download selected papers from Word, Markdown, or Excel lists"
+  default_prompt: "Use $download-papers-from-list to download selected papers from this document and report failures."
