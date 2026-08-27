@@ -12,6 +12,7 @@
 - 优先识别 PDF 下载地址，并可从清单提供的论文详情页中继续识别 `[pdf]`、`Download PDF` 等链接或按钮。
 - 支持 CVF/CVPR Open Access 详情页、`citation_pdf_url` 元数据、嵌入式 PDF 查看器和带 URL 属性的下载按钮。
 - 最多跟随 3 层详情页，并在后续请求中保留 Cookie 和来源页信息。
+- 支持在用户授权的已登录浏览器中处理 IEEE Xplore 等 JavaScript 页面，并点击经过核对的 PDF 按钮。
 - 排除常见的 GitHub、GitLab、Bitbucket 代码仓库地址，避免把代码链接当成论文。
 - 默认不覆盖已经下载的同名 PDF。
 - 下载后验证 PDF 文件签名，避免把登录页面或错误页面保存成 PDF。
@@ -102,6 +103,14 @@ git clone https://github.com/hfnjupt/download-papers-from-list.git `
 > 使用 `$download-papers-from-list`，只下载 Word 中标红并且题目包含 `cross-modal` 或 `multimodal` 的论文。
 
 这类请求会把格式条件和题目正则条件组合使用。
+
+### 范式七：使用机构登录下载 IEEE Xplore 论文
+
+> 使用 `$download-papers-from-list`，读取这个 Markdown 中加粗的论文。IEEE Xplore 页面请使用我已完成机构登录的浏览器，核对论文标题后点击标题旁的 `PDF` 按钮，保存 PDF 并单独记录浏览器下载结果。
+
+这种模式先使用 `--dry-run` 生成筛选队列，然后在用户授权的浏览器会话中逐篇打开详情页。程序不会读取或导出浏览器 Cookie、密码、验证码或机构凭据。如果出现 SSO、MFA 或验证码，需要用户接管完成登录后再继续。
+
+在 IEEE Xplore 页面中，应选择论文标题区域内、`Cite This` 旁边的红色 `PDF`，而不是 `Full Text Views`、引用导出、补充材料或广告中的图标。
 
 ## 直接运行下载程序
 
@@ -205,5 +214,7 @@ PDF输出目录/
 - 只有验证为 PDF 的响应才会保留为论文文件。
 
 如果网站的下载按钮完全依赖 JavaScript、登录、验证码或人工同意流程，并且页面 HTML 中没有公开下载地址，程序会记录失败原因，不会模拟绕过这些限制。
+
+当用户明确授权使用其机构登录会话时，Skill 可以改用浏览器辅助模式点击可见的 PDF 控件；没有订阅权限、需要付款或仍需用户完成验证时仍会记录为失败或“需要用户登录”。
 
 完整的 Codex 工作流程参见 [SKILL.md](SKILL.md)。

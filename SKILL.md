@@ -1,6 +1,6 @@
 ---
 name: download-papers-from-list
-description: Parse paper lists in Word (.docx), Markdown (.md), or Excel (.xlsx), select entries by formatting such as red titles or bold titles, download the associated PDFs, and produce success/failure reports. Use when the user supplies a literature list and asks to download all or only visually marked papers. Do not use for discovering papers that are absent from the supplied list.
+description: Parse paper lists in Word (.docx), Markdown (.md), or Excel (.xlsx), select entries by formatting such as red titles or bold titles, download the associated PDFs, and produce success/failure reports. When a listed publisher page requires JavaScript or an institutional login, use an authorized signed-in browser to activate the verified PDF control. Use when the user supplies a literature list and asks to download all or only visually marked papers. Do not use for discovering papers that are absent from the supplied list.
 ---
 
 # Download Papers From List
@@ -31,7 +31,12 @@ Do not broaden the task into a web literature search. A publisher or repository 
 
 ## Execute downloads
 
-Run the same command without `--dry-run`. Prefer the bundled workspace Python runtime because it normally includes `python-docx` and `openpyxl`.
+Choose the execution mode per entry:
+
+- Use the bundled script for direct PDF URLs and static landing pages.
+- Use authenticated browser mode when the user requests it, the source is an IEEE Xplore or similar JavaScript application, or the script receives an anti-bot/login page instead of article HTML. Read [references/browser-assisted-download.md](references/browser-assisted-download.md) before this mode.
+
+For direct/static mode, run the same command without `--dry-run`. Prefer the bundled workspace Python runtime because it normally includes `python-docx` and `openpyxl`.
 
 ```powershell
 python scripts/download_papers_from_list.py "C:\path\papers.docx" --output-dir "C:\path\downloaded" --select red
@@ -46,7 +51,7 @@ Useful options:
 - `--overwrite` only when the user authorizes replacing existing files
 - `--report-prefix NAME` for deterministic report names
 
-The helper accepts only public HTTP(S) targets, keeps landing-page cookies and referrers for the follow-up request, follows validated redirects, limits landing-page hops and file size, and requires a PDF signature before keeping a file. Treat JavaScript-only buttons that expose no URL, authentication, CAPTCHA, paywall, access-denied, and missing-link results as failures; do not attempt to bypass them.
+The helper accepts only public HTTP(S) targets, keeps landing-page cookies and referrers for the follow-up request, follows validated redirects, limits landing-page hops and file size, and requires a PDF signature before keeping a file. Browser mode may use an institutional session the user is authorized to use, but must not extract session cookies or credentials. Treat CAPTCHA, missing entitlement, access-denied, and missing-link results as failures; do not attempt to bypass them.
 
 ## Deliver results
 
