@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import http.cookiejar
 import ipaddress
 import re
 import socket
@@ -16,6 +17,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 
@@ -34,8 +36,9 @@ URL_HEADERS = {
 }
 BAD_URL_HEADERS = {"code", "code url", "github", "代码", "代码地址", "代码链接", "dataset", "数据集"}
 CODE_HOSTS = {"github.com", "www.github.com", "gitlab.com", "www.gitlab.com", "bitbucket.org"}
-PDF_LINK_HINTS = ("pdf", "download paper", "download pdf", "full text", "paper")
+PDF_LINK_HINTS = ("pdf", "download paper", "download pdf", "full text", "view paper", "view pdf")
 PDF_LINK_EXCLUDES = ("supp", "appendix", "poster", "slide", "presentation", "dataset", "code")
+MAX_LANDING_HOPS = 3
 
 
 @dataclass
@@ -353,34 +356,112 @@ def arxiv_pdf_url(url: str) -> str:
     return url
 
 
-def extract_pdf_link(page: bytes, base_url: str) -> str:
-    text = page.decode("utf-8", errors="ignore")
-    candidates: list[tuple[int, str]] = []
-    for match in re.finditer(r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", text, re.I | re.S):
-        href, label_html = html.unescape(match.group(1)), match.group(2)
-        label = clean_text(re.sub(r"<[^>]+>", " ", html.unescape(label_html))).lower()
-        absolute = urllib.parse.urljoin(base_url, href)
-        combined = f"{href} {label}".lower()
-        if any(bad in combined for bad in PDF_LINK_EXCLUDES):
-            continue
-        score = 0
-        if ".pdf" in urllib.parse.urlparse(absolute).path.lower():
-            score += 5
-        if any(hint in label for hint in PDF_LINK_HINTS):
-            score += 2
-        if score:
-            candidates.append((score, absolute))
-    if not candidates:
+def cvf_pdf_url(url: str) -> str:
+    """Resolve the stable CVF paper-page pattern without depending on button text."""
+    parsed = urllib.parse.urlparse(url)
+    if (parsed.hostname or "").lower() not in {"openaccess.thecvf.com", "www.openaccess.thecvf.com"}:
         return ""
-    return max(enumerate(candidates), key=lambda x: (x[1][0], -x[0]))[1][1]
+    if "/html/" not in parsed.path or not parsed.path.endswith("_paper.html"):
+        return ""
+    path = parsed.path.replace("/html/", "/papers/", 1)[:-5] + ".pdf"
+    return urllib.parse.urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
 
 
-def open_url(opener, url: str, timeout: float):
+class PdfCandidateParser(HTMLParser):
+    """Collect PDF-like links from anchors, metadata, embedded viewers, and buttons."""
+
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.candidates: list[tuple[int, int, str]] = []
+        self._order = 0
+        self._anchor_href = ""
+        self._anchor_text: list[str] = []
+
+    def add(self, raw_url: str, score: int, context: str = "") -> None:
+        raw_url = html.unescape(clean_text(raw_url))
+        if not raw_url or raw_url.startswith(("javascript:", "mailto:", "#")):
+            return
+        absolute = urllib.parse.urljoin(self.base_url, raw_url)
+        combined = f"{raw_url} {context}".lower()
+        if any(bad in combined for bad in PDF_LINK_EXCLUDES):
+            return
+        path = urllib.parse.urlparse(absolute).path.lower()
+        if ".pdf" in path:
+            score += 8
+        if score <= 0:
+            return
+        self.candidates.append((score, -self._order, absolute))
+        self._order += 1
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = {str(k).lower(): str(v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "a":
+            self._anchor_href = attributes.get("href", "")
+            self._anchor_text = []
+        elif tag == "meta":
+            key = (attributes.get("name") or attributes.get("property")).lower()
+            if key in {"citation_pdf_url", "citation_pdf", "dc.source", "og:pdf"}:
+                self.add(attributes.get("content", ""), 20, key)
+        elif tag == "link":
+            relation = f"{attributes.get('rel', '')} {attributes.get('type', '')}".lower()
+            if "pdf" in relation or "alternate" in relation:
+                self.add(attributes.get("href", ""), 12, relation)
+        elif tag in {"iframe", "embed", "object"}:
+            self.add(attributes.get("src") or attributes.get("data", ""), 10, tag)
+        elif tag in {"button", "input"}:
+            context = " ".join([attributes.get("aria-label", ""), attributes.get("title", ""), attributes.get("value", "")])
+            for key in ("data-href", "data-url", "formaction", "href"):
+                if attributes.get(key):
+                    self.add(attributes[key], 8 if "pdf" in context.lower() else 2, context)
+            onclick = attributes.get("onclick", "")
+            match = re.search(r"(?:location(?:\.href)?|window\.open)\s*\(?\s*[=:]?\s*[\"']([^\"']+)", onclick, re.I)
+            if match:
+                self.add(match.group(1), 8 if "pdf" in context.lower() else 2, context)
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor_href:
+            self._anchor_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._anchor_href:
+            return
+        label = clean_text(" ".join(self._anchor_text)).lower().strip("[]()")
+        score = 0
+        if label == "pdf":
+            score += 20
+        elif any(hint in label for hint in PDF_LINK_HINTS):
+            score += 8
+        self.add(self._anchor_href, score, label)
+        self._anchor_href = ""
+        self._anchor_text = []
+
+
+def extract_pdf_link(page: bytes, base_url: str) -> str:
+    known_cvf = cvf_pdf_url(base_url)
+    if known_cvf:
+        return known_cvf
+    text = page.decode("utf-8", errors="ignore")
+    parser = PdfCandidateParser(base_url)
+    try:
+        parser.feed(text)
+        parser.close()
+    except (ValueError, AssertionError):
+        pass
+    return max(parser.candidates, default=(0, 0, ""))[2]
+
+
+def open_url(opener, url: str, timeout: float, referer: str = ""):
     validate_public_url(url)
-    request = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; CodexPaperDownloader/1.0)",
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
         "Accept": "application/pdf,text/html;q=0.9,*/*;q=0.5",
-    })
+        "Accept-Language": "en-US,en;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+    request = urllib.request.Request(url, headers=headers)
     return opener.open(request, timeout=timeout)
 
 
@@ -397,6 +478,35 @@ def available_path(output_dir: Path, filename: str, overwrite: bool) -> tuple[Pa
     return target, True
 
 
+def resolve_and_download(opener, start_url: str, target: Path, timeout: float, max_bytes: int) -> tuple[Path, str, int]:
+    """Follow a bounded chain of landing pages until a verified PDF is reached."""
+    current_url = start_url
+    referer = ""
+    visited: set[str] = set()
+    for hop in range(MAX_LANDING_HOPS + 1):
+        if current_url in visited:
+            raise ValueError("Landing-page link cycle detected")
+        visited.add(current_url)
+        with open_url(opener, current_url, timeout, referer) as response:
+            final_url = response.geturl()
+            content_type = response.headers.get_content_type().lower()
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError("File exceeds configured maximum size")
+            prefix = response.read(1024)
+            if b"%PDF-" in prefix:
+                return write_stream(target, prefix, response, max_bytes), final_url, hop
+            if content_type not in {"text/html", "application/xhtml+xml"} and b"<html" not in prefix.lower() and b"<!doctype" not in prefix.lower():
+                raise ValueError(f"Response is not a PDF or HTML landing page (content type: {content_type})")
+            page_limit = min(6 * 1024 * 1024, max_bytes)
+            page = prefix + response.read(page_limit - len(prefix))
+            pdf_url = extract_pdf_link(page, final_url)
+            if not pdf_url:
+                raise ValueError("Landing page did not expose a PDF link, PDF button, or citation_pdf_url metadata")
+            referer, current_url = final_url, pdf_url
+    raise ValueError(f"PDF was not reached after {MAX_LANDING_HOPS} landing-page hops")
+
+
 def download_one(item: PaperItem, output_dir: Path, timeout: float, max_bytes: int, overwrite: bool) -> PaperItem:
     if not item.selected or item.status == "failed":
         return item
@@ -406,41 +516,20 @@ def download_one(item: PaperItem, output_dir: Path, timeout: float, max_bytes: i
         item.saved_file = str(target)
         item.reason = "File already exists; overwrite was not enabled"
         return item
-    opener = urllib.request.build_opener(SafeRedirectHandler())
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(SafeRedirectHandler(), urllib.request.HTTPCookieProcessor(cookie_jar))
     url = arxiv_pdf_url(item.url)
     temp_path: Path | None = None
     try:
-        with open_url(opener, url, timeout) as response:
-            final_url = response.geturl()
-            content_type = response.headers.get_content_type().lower()
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > max_bytes:
-                raise ValueError("File exceeds configured maximum size")
-            prefix = response.read(1024)
-            if b"%PDF-" not in prefix:
-                if content_type not in {"text/html", "application/xhtml+xml"} and b"<html" not in prefix.lower():
-                    raise ValueError(f"Response is not a PDF (content type: {content_type})")
-                page = prefix + response.read(min(6 * 1024 * 1024, max_bytes) - len(prefix))
-                pdf_url = extract_pdf_link(page, final_url)
-                if not pdf_url:
-                    raise ValueError("Landing page did not expose a clear PDF link")
-                with open_url(opener, pdf_url, timeout) as pdf_response:
-                    final_url = pdf_response.geturl()
-                    length = pdf_response.headers.get("Content-Length")
-                    if length and int(length) > max_bytes:
-                        raise ValueError("PDF exceeds configured maximum size")
-                    prefix = pdf_response.read(1024)
-                    if b"%PDF-" not in prefix:
-                        raise ValueError("Resolved download is not a valid PDF")
-                    temp_path = write_stream(target, prefix, pdf_response, max_bytes)
-            else:
-                temp_path = write_stream(target, prefix, response, max_bytes)
+        temp_path, final_url, landing_hops = resolve_and_download(opener, url, target, timeout, max_bytes)
         if not temp_path or temp_path.stat().st_size < 1024:
             raise ValueError("Downloaded PDF is empty or truncated")
         temp_path.replace(target)
         item.status = "success"
         item.saved_file = str(target)
         item.final_url = final_url
+        if landing_hops:
+            item.reason = f"Resolved PDF through {landing_hops} landing page(s)"
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         if temp_path and temp_path.exists():
             temp_path.unlink(missing_ok=True)
@@ -502,7 +591,10 @@ def write_reports(items: list[PaperItem], output_dir: Path, prefix: str, source:
         "| Status | Title | Source location | Detail |", "|---|---|---|---|",
     ]
     for item in items:
-        detail = item.reason or item.saved_file or item.url
+        if item.status == "success" and item.reason:
+            detail = f"{item.saved_file} — {item.reason}; final URL: {item.final_url}"
+        else:
+            detail = item.reason or item.saved_file or item.url
         escaped_title = item.title.replace("|", "\\|")
         escaped_source = item.source_location.replace("|", "\\|")
         escaped_detail = clean_text(detail).replace("|", "\\|")

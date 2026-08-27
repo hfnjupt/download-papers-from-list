@@ -27,7 +27,7 @@ Use `scripts/download_papers_from_list.py` in `--dry-run` mode first. Review the
 - The selected count matches the requested formatting rule.
 - Ambiguous or missing URLs are reported, not guessed from the title.
 
-Do not broaden the task into a web literature search. A publisher or repository landing-page URL already present in the list may be followed to its PDF link; do not search for a different copy unless the user asks.
+Do not broaden the task into a web literature search. A publisher or repository landing-page URL already present in the list may be followed through a bounded chain to its PDF. The helper recognizes ordinary PDF anchors (including CVF/CVPR `[pdf]` links), `citation_pdf_url` metadata, embedded PDF viewers, and download buttons backed by an HTML URL attribute. Do not search for a different copy unless the user asks.
 
 ## Execute downloads
 
@@ -46,7 +46,7 @@ Useful options:
 - `--overwrite` only when the user authorizes replacing existing files
 - `--report-prefix NAME` for deterministic report names
 
-The helper accepts only public HTTP(S) targets, follows validated redirects, limits file size, and requires a PDF signature before keeping a file. Treat authentication, CAPTCHA, paywall, access-denied, and missing-link results as failures; do not attempt to bypass them.
+The helper accepts only public HTTP(S) targets, keeps landing-page cookies and referrers for the follow-up request, follows validated redirects, limits landing-page hops and file size, and requires a PDF signature before keeping a file. Treat JavaScript-only buttons that expose no URL, authentication, CAPTCHA, paywall, access-denied, and missing-link results as failures; do not attempt to bypass them.
 
 ## Deliver results
 
